@@ -25,6 +25,7 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+// rpc requests to ask coordinator for a job
 type ReqJobArgs struct{}
 type ReqJobReply struct {
 	Ttype     string // task type , "map" or "reduce" or "exit" or "busy"
@@ -33,6 +34,13 @@ type ReqJobReply struct {
 	ReduceCnt int    // total number of reduce tasks (number of buckets)
 	Id        int    // if a map task, the id of the input file; if a reduce task, the id of the bucket
 }
+
+// rpc requests to ack a finished job
+type AckJobArgs struct {
+	Ttype string // task type, "map" or "reduce"
+	Tid   int    // if a map task, the id of the input file;  if a reduce task, the id of the bucket
+}
+type AckJobReply struct{} //empty reply for ack
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.

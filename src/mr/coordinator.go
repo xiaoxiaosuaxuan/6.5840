@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -20,6 +21,7 @@ type Coordinator struct {
 }
 
 // Your code here -- RPC handlers for the worker to call.
+// rpc call for workers to ask for job
 func (c *Coordinator) ReqJob(args ReqJobArgs, reply *ReqJobReply) error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
@@ -53,6 +55,26 @@ func (c *Coordinator) ReqJob(args ReqJobArgs, reply *ReqJobReply) error {
 	}
 	if reply.Ttype == "" {
 		reply.Ttype = "busy"
+	}
+	return nil
+}
+
+// rpc call for workers to ack finished job
+func (c *Coordinator) AckJob(args *AckJobArgs, reply *AckJobReply) error {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	if args.Ttype == "map" {
+		if c.mTaskStats[args.Tid] == 1 {
+			c.mTaskStats[args.Tid] = 2
+			c.finishedMap += 1
+		}
+	} else if args.Ttype == "reduce" {
+		if c.rTaskStats[args.Tid] == 1 {
+			c.rTaskStats[args.Tid] = 2
+			c.finishedReduce += 1
+		}
+	} else {
+		return fmt.Errorf("unsupported ack job with type %v", args.Ttype)
 	}
 	return nil
 }

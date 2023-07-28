@@ -38,6 +38,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 			break
 		}
+
 		log.Printf("get job with type %v", reply.Ttype)
 		if reply.Ttype == "busy" {
 			time.Sleep(time.Second)
@@ -49,6 +50,15 @@ func Worker(mapf func(string, string) []KeyValue,
 
 		} else {
 			log.Fatalf("unsupported task type %v !", reply.Ttype)
+		}
+
+		ackArgs := AckJobArgs{
+			reply.Ttype, reply.Id,
+		}
+		ackReply := AckJobReply{}
+		err = call("Coordinator.AckJob", &ackArgs, &ackReply)
+		if err != nil {
+			log.Fatalf("ack RPC failed with %v!", err)
 		}
 	}
 }
@@ -76,14 +86,17 @@ func handleMap(fname string, mapId int, reduceCnt int,
 		if err != nil {
 			log.Fatal(err)
 		}
-		kv_json, err := json.Marshal(kv_buckets[rid])
-		if err != nil {
-			log.Fatal(err)
-		}
-		_, err = midFile.Write(kv_json)
-		if err != nil {
-			log.Fatal(err)
-		}
+		func() {
+			defer midFile.Close()
+			kv_json, err := json.Marshal(kv_buckets[rid])
+			if err != nil {
+				log.Fatal(err)
+			}
+			_, err = midFile.Write(kv_json)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}()
 	}
 }
 
