@@ -1,33 +1,67 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
-
+import (
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+)
 
 type Coordinator struct {
-	// Your definitions here.
-
+	lock           sync.Mutex // 锁，用来保护并发rpc请求时的任务状态
+	files          []string   // 输入文件的切片
+	mTaskStats     []int      // map task 状态； 0: 未分配  1: 已分配    2:已完成
+	rTaskStats     []int      // reduce task 状态；0:未分配  1:已分配   2:已完成
+	finishedMap    int        // 已完成 map task 的数量
+	finishedReduce int        // 已完成 reduce task 的数量
+	reduceCnt      int        // reduce task 的数量
 }
 
 // Your code here -- RPC handlers for the worker to call.
+func (c *Coordinator) ReqJob(args ReqJobArgs, reply *ReqJobReply) error {
+	c.lock.Lock()
+	defer c.lock.Unlock()
 
-//
+	reply.MapCnt = len(c.files)
+	reply.ReduceCnt = c.reduceCnt
+	if c.finishedMap == len(c.files) { // give reduce or exit task
+		if c.finishedReduce == c.reduceCnt {
+			reply.Ttype = "exit"
+		} else {
+			reply.Ttype = "reduce"
+			for idx, stat := range c.rTaskStats {
+				if stat == 0 {
+					c.rTaskStats[idx] = 1
+					reply.Id = idx
+					break
+				}
+			}
+		}
+	} else { // give map task
+		reply.Ttype = "map"
+		for idx, file := range c.files {
+			if c.mTaskStats[idx] == 0 {
+				c.mTaskStats[idx] = 1
+				reply.File = file
+				reply.Id = idx
+				break
+			}
+		}
+	}
+	return nil
+}
+
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.
-//
 func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
 }
 
-
-//
 // start a thread that listens for RPCs from worker.go
-//
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
@@ -41,29 +75,23 @@ func (c *Coordinator) server() {
 	go http.Serve(l, nil)
 }
 
-//
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
-//
 func (c *Coordinator) Done() bool {
 	ret := false
 
 	// Your code here.
 
-
 	return ret
 }
 
-//
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
-//
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
 	// Your code here.
-
 
 	c.server()
 	return &c
