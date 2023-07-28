@@ -8,6 +8,7 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
 type Coordinator struct {
@@ -55,6 +56,22 @@ func (c *Coordinator) ReqJob(args ReqJobArgs, reply *ReqJobReply) error {
 	}
 	if reply.Ttype == "" {
 		reply.Ttype = "busy"
+	}
+	if reply.Ttype == "map" || reply.Ttype == "reduce" { // handle crash worker
+		go func(c *Coordinator, ttype string, tid int) {
+			time.Sleep(10 * time.Second)
+			c.lock.Lock()
+			defer c.lock.Unlock()
+			if ttype == "map" {
+				if c.mTaskStats[tid] == 1 {
+					c.mTaskStats[tid] = 0
+				}
+			} else if ttype == "reduce" {
+				if c.rTaskStats[tid] == 1 {
+					c.rTaskStats[tid] = 0
+				}
+			}
+		}(c, reply.Ttype, reply.Id)
 	}
 	return nil
 }

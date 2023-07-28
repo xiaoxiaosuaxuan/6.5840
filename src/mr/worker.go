@@ -33,9 +33,6 @@ func Worker(mapf func(string, string) []KeyValue,
 		reply := ReqJobReply{}
 		err := call("Coordinator.ReqJob", args, &reply)
 		if err != nil || reply.Ttype == "exit" {
-			if err != nil {
-				log.Fatalf("call RPC ReqJob failed with %v!", err)
-			}
 			break
 		}
 
@@ -66,7 +63,7 @@ func Worker(mapf func(string, string) []KeyValue,
 func handleReduce(reduceId int, mapCnt int, reducef func(string, []string) string) {
 	interKVlist := make(map[string][]string)
 	for mid := 0; mid < mapCnt; mid++ {
-		interFname := fmt.Sprintf("./mr-tmp/mr-%d-%d.json", mid, reduceId)
+		interFname := fmt.Sprintf("mr-%d-%d.json", mid, reduceId)
 		func() {
 			interContent, err := os.ReadFile(interFname)
 			if err != nil {
@@ -86,7 +83,7 @@ func handleReduce(reduceId int, mapCnt int, reducef func(string, []string) strin
 			}
 		}()
 	}
-	outputFname := fmt.Sprintf("./mr-tmp/mr-out-%d", reduceId)
+	outputFname := fmt.Sprintf("mr-out-%d", reduceId)
 	outputFile, err := os.Create(outputFname)
 	if err != nil {
 		log.Fatal(err)
@@ -119,7 +116,7 @@ func handleMap(fname string, mapId int, reduceCnt int,
 		kv_buckets[rid] = append(kv_buckets[rid], kv_all[i])
 	}
 	for rid := 0; rid < reduceCnt; rid++ {
-		midFname := fmt.Sprintf("./mr-tmp/mr-%d-%d.json", mapId, rid)
+		midFname := fmt.Sprintf("mr-%d-%d.json", mapId, rid)
 		midFile, err := os.Create(midFname)
 		if err != nil {
 			log.Fatal(err)
