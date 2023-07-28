@@ -27,7 +27,7 @@ type ExampleReply struct {
 // Add your RPC definitions here.
 type ReqJobArgs struct{}
 type ReqJobReply struct {
-	Ttype     string // task type , "map" or "reduce" or "exit"
+	Ttype     string // task type , "map" or "reduce" or "exit" or "busy"
 	File      string // file to be processed, if a map task
 	MapCnt    int    // total number of map tasks (number of files)
 	ReduceCnt int    // total number of reduce tasks (number of buckets)

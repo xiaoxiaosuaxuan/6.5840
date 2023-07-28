@@ -30,25 +30,27 @@ func (c *Coordinator) ReqJob(args ReqJobArgs, reply *ReqJobReply) error {
 		if c.finishedReduce == c.reduceCnt {
 			reply.Ttype = "exit"
 		} else {
-			reply.Ttype = "reduce"
 			for idx, stat := range c.rTaskStats {
 				if stat == 0 {
 					c.rTaskStats[idx] = 1
+					reply.Ttype = "reduce"
 					reply.Id = idx
 					break
 				}
 			}
+			reply.Ttype = "busy"
 		}
 	} else { // give map task
-		reply.Ttype = "map"
 		for idx, file := range c.files {
 			if c.mTaskStats[idx] == 0 {
 				c.mTaskStats[idx] = 1
+				reply.Ttype = "map"
 				reply.File = file
 				reply.Id = idx
 				break
 			}
 		}
+		reply.Ttype = "busy"
 	}
 	return nil
 }

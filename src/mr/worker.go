@@ -3,8 +3,11 @@ package mr
 import (
 	"fmt"
 	"hash/fnv"
+	"io/ioutil"
 	"log"
 	"net/rpc"
+	"os"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -25,7 +28,46 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 	for {
+		args := ReqJobArgs{}
+		reply := ReqJobReply{}
+		err := call("Coordinator.ReqJob", args, &reply)
+		if err != nil || reply.Ttype == "exit" {
+			break
+		}
+		if reply.Ttype == "busy" {
+			time.Sleep(time.Second)
+			continue
+		}
+		if reply.Ttype == "map" {
+			handleMap(reply.File, reply.Id, reply.ReduceCnt, mapf)
+		} else if reply.Ttype == "reduce" {
 
+		} else {
+			log.Fatalf("unsupported task type %v !", reply.Ttype)
+		}
+	}
+}
+
+func handleMap(fname string, mapId int, reduceCnt int,
+	mapf func(string, string) []KeyValue) {
+	file, err := os.Open(fname)
+	if err != nil {
+		log.Fatalf("cannot open %v", fname)
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", fname)
+	}
+	file.Close()
+	kv_all := mapf(fname, string(content))
+	kv_buckets := make([][]KeyValue, reduceCnt)
+	for i := range kv_all {
+		rid := ihash(kv_all[i].Key) % reduceCnt
+		kv_buckets[rid] = append(kv_buckets[rid], kv_all[i])
+	}
+	for rid := 0; rid < reduceCnt; rid++ {
+		midFname := fmt.Sprintf("mr-%d-%d", mapId, rid)
+		toWrite := kv_buckets[rid]
 	}
 }
 
@@ -47,8 +89,8 @@ func CallExample() {
 	// the "Coordinator.Example" tells the
 	// receiving server that we'd like to call
 	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
-	if ok {
+	err := call("Coordinator.Example", &args, &reply)
+	if err == nil {
 		// reply.Y should be 100.
 		fmt.Printf("reply.Y %v\n", reply.Y)
 	} else {
@@ -59,20 +101,17 @@ func CallExample() {
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-func call(rpcname string, args interface{}, reply interface{}) bool {
+func call(rpcname string, args interface{}, reply interface{}) error {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
-		log.Fatal("dialing:", err)
+		return err
 	}
 	defer c.Close()
 
 	err = c.Call(rpcname, args, reply)
-	if err == nil {
-		return true
+	if err != nil {
+		return err
 	}
-
-	fmt.Println(err)
-	return false
 }
