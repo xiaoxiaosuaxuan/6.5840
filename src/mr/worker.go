@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io/ioutil"
@@ -32,8 +33,12 @@ func Worker(mapf func(string, string) []KeyValue,
 		reply := ReqJobReply{}
 		err := call("Coordinator.ReqJob", args, &reply)
 		if err != nil || reply.Ttype == "exit" {
+			if err != nil {
+				log.Fatalf("call RPC ReqJob failed with %v!", err)
+			}
 			break
 		}
+		log.Printf("get job with type %v", reply.Ttype)
 		if reply.Ttype == "busy" {
 			time.Sleep(time.Second)
 			continue
@@ -66,8 +71,19 @@ func handleMap(fname string, mapId int, reduceCnt int,
 		kv_buckets[rid] = append(kv_buckets[rid], kv_all[i])
 	}
 	for rid := 0; rid < reduceCnt; rid++ {
-		midFname := fmt.Sprintf("mr-%d-%d", mapId, rid)
-		toWrite := kv_buckets[rid]
+		midFname := fmt.Sprintf("mr-%d-%d.json", mapId, rid)
+		midFile, err := os.Create(midFname)
+		if err != nil {
+			log.Fatal(err)
+		}
+		kv_json, err := json.Marshal(kv_buckets[rid])
+		if err != nil {
+			log.Fatal(err)
+		}
+		_, err = midFile.Write(kv_json)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 }
 
@@ -114,4 +130,5 @@ func call(rpcname string, args interface{}, reply interface{}) error {
 	if err != nil {
 		return err
 	}
+	return nil
 }

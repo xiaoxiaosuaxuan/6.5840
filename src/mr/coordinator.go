@@ -26,6 +26,7 @@ func (c *Coordinator) ReqJob(args ReqJobArgs, reply *ReqJobReply) error {
 
 	reply.MapCnt = len(c.files)
 	reply.ReduceCnt = c.reduceCnt
+	reply.Ttype = ""
 	if c.finishedMap == len(c.files) { // give reduce or exit task
 		if c.finishedReduce == c.reduceCnt {
 			reply.Ttype = "exit"
@@ -38,7 +39,6 @@ func (c *Coordinator) ReqJob(args ReqJobArgs, reply *ReqJobReply) error {
 					break
 				}
 			}
-			reply.Ttype = "busy"
 		}
 	} else { // give map task
 		for idx, file := range c.files {
@@ -50,6 +50,8 @@ func (c *Coordinator) ReqJob(args ReqJobArgs, reply *ReqJobReply) error {
 				break
 			}
 		}
+	}
+	if reply.Ttype == "" {
 		reply.Ttype = "busy"
 	}
 	return nil
@@ -91,7 +93,15 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
+	c := Coordinator{
+		lock:           sync.Mutex{},
+		files:          files,
+		mTaskStats:     make([]int, len(files)),
+		rTaskStats:     make([]int, nReduce),
+		finishedMap:    0,
+		finishedReduce: 0,
+		reduceCnt:      nReduce,
+	}
 
 	// Your code here.
 
