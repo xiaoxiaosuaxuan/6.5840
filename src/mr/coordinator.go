@@ -121,8 +121,9 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
+	c.lock.Lock()
 	ret := (c.reduceCnt == c.finishedReduce)
-
+	c.lock.Unlock()
 	return ret
 }
 
