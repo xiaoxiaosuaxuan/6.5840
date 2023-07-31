@@ -79,6 +79,10 @@ type Raft struct {
 	// if a leader
 	nextIndex  []int
 	matchIndex []int
+
+	//2B
+	// notifyApply chan bool     // channel to notify the applyCommit goroutine : 1. raft server closed , or 2. commitIndex updated
+	applyCh chan ApplyMsg // channel to reply applied msg
 }
 
 // return currentTerm and whether this server
@@ -142,7 +146,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-// -------------------------------- AppendEntries RPC --------------------------
+// -------------------------------- AppendEntries RPC ----------------------------------------------
 type AppendEntriesArgs struct {
 	Term         int
 	LeaderId     int
@@ -174,29 +178,44 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}()
 	rf.resetTimer = true
 	reply.Term = rf.currentTerm
-	// simplified in 2A
-	reply.Success = (args.PrevLogIndex == 0)
+	// 2B
+	if args.PrevLogIndex != 0 && // AppendEntriesRPC. 2 Rule
+		(len(rf.log) < args.PrevLogIndex || rf.log[args.PrevLogIndex-1].Term != args.PrevLogTerm) {
+		reply.Success = false
+		return
+	}
+
+	reply.Success = true
+	myLogIndex := args.PrevLogIndex // drop conflicting entries, append new ones.     3. 4. Rules
+	entryIndex := 0
+	for {
+		if len(rf.log) < myLogIndex+1 || entryIndex >= len(args.Entries) ||
+			rf.log[myLogIndex].Term != args.Entries[entryIndex].Term {
+			break
+		}
+		myLogIndex++
+		entryIndex++
+	}
+	if entryIndex < len(args.Entries) {
+		rf.log = rf.log[:myLogIndex]
+		rf.log = append(rf.log, args.Entries[entryIndex:]...)
+	}
+
+	if len(rf.log) < args.LeaderCommit { // update commit index, min(LeaderCommit, len(log))  ,5 Rule
+		rf.commitIndex = len(rf.log)
+	} else {
+		rf.commitIndex = args.LeaderCommit
+	}
+
 }
 
-func (rf *Raft) sendAppendEntries(sid int) {
-	rf.mu.Lock()
-	// log.Printf("Send reply of AppendEntries RPC! server id: %v, server state: %v, target id: %v", rf.me, rf.state, sid)
-	args := AppendEntriesArgs{
-		Term:         rf.currentTerm,
-		LeaderId:     rf.me,
-		PrevLogIndex: rf.nextIndex[sid] - 1,
-		LeaderCommit: rf.commitIndex,
-	}
-	oldTerm := rf.currentTerm
-	rf.mu.Unlock()
-
-	reply := AppendEntriesReply{}
-	ok := rf.peers[sid].Call("Raft.AppendEntries", &args, &reply)
+func (rf *Raft) sendAppendEntries(sid int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	oldTerm := args.Term
+	ok := rf.peers[sid].Call("Raft.AppendEntries", args, reply)
 	if ok {
 		rf.mu.Lock()
-		// log.Printf("get reply of AppendEntries RPC! server id: %v, server state: %v", rf.me, rf.state)
-		if rf.currentTerm != oldTerm {
-			rf.mu.Unlock()
+		defer rf.mu.Unlock()
+		if rf.currentTerm != oldTerm || rf.state != 2 {
 			return
 		}
 		if reply.Term > rf.currentTerm {
@@ -204,17 +223,22 @@ func (rf *Raft) sendAppendEntries(sid int) {
 			rf.votedFor = -1
 			rf.votes = 0
 			rf.state = 0
-			rf.mu.Unlock()
-			// log.Printf("leader get reply with larger term in ApEntries! server id: %v", rf.me)
+			rf.nextIndex = []int{}
+			rf.matchIndex = []int{}
 			go rf.followerTicker()
 			return
 		}
-		rf.mu.Unlock()
-		// if reply.Success {
-
-		// } else {
-
-		// }
+		if reply.Success {
+			idx := args.PrevLogIndex + len(args.Entries)
+			if idx > rf.matchIndex[sid] { // matchIndex[sid] may be updated to a later position
+				rf.matchIndex[sid] = idx
+			}
+			if idx+1 > rf.nextIndex[sid] {
+				rf.nextIndex[sid] = idx + 1
+			}
+		} else {
+			rf.nextIndex[sid] = args.PrevLogIndex
+		}
 	}
 }
 
@@ -344,7 +368,29 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
+	if rf.killed() {
+		index = -1
+		term = -1
+		isLeader = false
+		return index, term, isLeader
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term = rf.currentTerm
+	isLeader = (rf.state == 2)
+	if !isLeader {
+		index = -1
+	} else {
+		index = len(rf.log) + 1
+		go func() {
+			rf.mu.Lock()
+			rf.log = append(rf.log, Entry{
+				Term:    term,
+				Command: command,
+			})
+			rf.mu.Unlock()
+		}()
+	}
 	return index, term, isLeader
 }
 
@@ -360,6 +406,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	// go func() { // use a goroutine to send kill msg, to avoid blocking and make Kill() return immediately
+	// 	rf.notifyApply <- true
+	// 	close(rf.notifyApply)
+	// }()
 }
 
 func (rf *Raft) killed() bool {
@@ -380,9 +430,27 @@ func (rf *Raft) ticker() {
 	}
 }
 
-// ----------------------- common functions for raft servers ------------------
-func (rf *Raft) checkLastApplied() {
-
+// ----------------------- common functions for raft servers ---------------------------------------------------------
+// goroutines for every raft server, to send ApplyMessage if commitIndex > lastApplied
+func (rf *Raft) applyCommit() {
+	for !rf.killed() {
+		tmpMsgs := []ApplyMsg{}
+		rf.mu.Lock()
+		if rf.commitIndex > rf.lastApplied {
+			for logId := rf.lastApplied - 1 + 1; logId <= rf.commitIndex-1; logId++ {
+				tmpMsgs = append(tmpMsgs, ApplyMsg{
+					CommandValid: true,
+					Command:      rf.log[logId].Command,
+					CommandIndex: logId + 1,
+				})
+			}
+			rf.lastApplied = rf.commitIndex
+		}
+		rf.mu.Unlock()
+		for _, msg := range tmpMsgs { // without holding lock,  to avoid applyCh blocking
+			rf.applyCh <- msg
+		}
+	}
 }
 
 func (rf *Raft) checkHigherTerm(term int) {
@@ -405,7 +473,6 @@ func (rf *Raft) followerTicker() {
 	// rf.resetTimer = false
 	// rf.mu.Unlock()
 	for !rf.killed() {
-		go rf.checkLastApplied()
 		ms := 150 + (rand.Int() % 200)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		rf.mu.Lock()
@@ -423,7 +490,6 @@ func (rf *Raft) followerTicker() {
 
 func (rf *Raft) candidateTicker() {
 	for !rf.killed() {
-		go rf.checkLastApplied()
 
 		rf.mu.Lock()
 		rf.state = 1
@@ -466,13 +532,74 @@ func (rf *Raft) candidateTicker() {
 	}
 }
 
-func (rf *Raft) leaderUpdateCommitIndex() {
-
+// necessary check since the leader can (only) convert to follower asynchronously at any time
+// must hold the lock when called
+func (rf *Raft) leaderCheck() {
+	if rf.state != 2 {
+		rf.mu.Unlock()
+		return
+	}
 }
 
+// leader's goroutine that periodically check lastLogIndex >= nextIndex
+// and send AppendEntriesRPC
+func (rf *Raft) leaderAppendEntriesTicker() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		rf.leaderCheck()
+		for rid := range rf.peers {
+			if rid != rf.me && len(rf.log) >= rf.nextIndex[rid] {
+				args := &AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: rf.nextIndex[rid] - 1,
+					PrevLogTerm:  -1,
+					LeaderCommit: rf.commitIndex,
+				}
+				if args.PrevLogIndex > 0 {
+					args.PrevLogTerm = rf.log[args.PrevLogIndex-1].Term
+				}
+				// log.Printf("nextIndex is %v", rf.nextIndex[rid])
+				args.Entries = rf.log[rf.nextIndex[rid]-1:]
+				reply := &AppendEntriesReply{}
+				go rf.sendAppendEntries(rid, args, reply)
+			}
+		}
+		rf.mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// leader's goroutine to periodically update the commit index
+func (rf *Raft) leaderUpdateCommitTicker() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		rf.leaderCheck()
+		for n := rf.commitIndex + 1; n <= len(rf.log); n++ {
+			if rf.log[n-1].Term != rf.currentTerm {
+				continue
+			}
+			num := 1
+			for pid := range rf.peers {
+				if pid != rf.me && rf.matchIndex[pid] >= n {
+					num++
+				}
+				if num >= len(rf.peers)/2+1 {
+					rf.commitIndex = n
+					break
+				}
+			}
+		}
+		rf.mu.Unlock()
+		time.Sleep(40 * time.Millisecond)
+	}
+}
+
+// leader's goroutine for initializing,  sending heart beat, starting other goroutines
 func (rf *Raft) leaderTicker() {
 	rf.mu.Lock()
-	rf.nextIndex = make([]int, len(rf.peers)) // initialized
+	rf.leaderCheck()
+	rf.nextIndex = make([]int, len(rf.peers)) // initialize matchIndex[] and nextIndex
 	rf.matchIndex = make([]int, len(rf.peers))
 	for rid := range rf.peers {
 		if rid != rf.me {
@@ -482,27 +609,33 @@ func (rf *Raft) leaderTicker() {
 	}
 	rf.mu.Unlock()
 
+	go rf.leaderAppendEntriesTicker()
+	go rf.leaderUpdateCommitTicker()
+
 	for !rf.killed() {
 		rf.mu.Lock()
+		rf.leaderCheck()
 		for rid := range rf.peers {
 			if rid != rf.me {
-				go rf.sendAppendEntries(rid)
+				args := &AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: rf.nextIndex[rid] - 1,
+					LeaderCommit: rf.commitIndex,
+				}
+				if args.PrevLogIndex == 0 {
+					args.PrevLogTerm = -1
+				} else {
+					args.PrevLogTerm = rf.log[args.PrevLogIndex-1].Term
+				}
+				args.Entries = []Entry{}
+				reply := &AppendEntriesReply{}
+				go rf.sendAppendEntries(rid, args, reply)
 			}
 		}
 		rf.mu.Unlock()
 
 		time.Sleep(100 * time.Millisecond)
-		rf.mu.Lock()
-		// log.Printf("server id: %v, state: %v, term: %v, in leaderTicker", rf.me, rf.state, rf.currentTerm)
-		if rf.state != 2 {
-			rf.mu.Unlock()
-			go rf.followerTicker()
-			break
-		}
-		rf.mu.Unlock()
-
-		// rf.leaderUpdateCommitIndex()
-		// rf.checkLastApplied()
 	}
 }
 
@@ -523,6 +656,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.mu = sync.Mutex{}
 	rf.dead = 0
 	rf.state = 0
 	rf.resetTimer = false
@@ -531,11 +665,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.followerTicker()
+	// start the applyCommit goroutine
+	go rf.applyCommit()
 
 	return rf
 }
