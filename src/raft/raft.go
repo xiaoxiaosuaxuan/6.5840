@@ -239,6 +239,21 @@ func (rf *Raft) sendAppendEntries(sid int, args *AppendEntriesArgs, reply *Appen
 			// }
 		} else {
 			rf.nextIndex[sid] = args.PrevLogIndex
+			retryArgs := &AppendEntriesArgs{ // send a new AppendEntriesRPC immediately
+				Term:         rf.currentTerm,
+				LeaderId:     rf.me,
+				PrevLogIndex: rf.nextIndex[sid] - 1,
+				PrevLogTerm:  -1,
+				LeaderCommit: rf.commitIndex,
+			}
+			if retryArgs.PrevLogIndex != 0 {
+				retryArgs.PrevLogTerm = rf.log[retryArgs.PrevLogIndex-1].Term
+			}
+			copyEntries := rf.log[rf.nextIndex[sid]-1:]
+			retryArgs.Entries = make([]Entry, len(copyEntries))
+			copy(retryArgs.Entries, copyEntries)
+			retryReply := &AppendEntriesReply{}
+			go rf.sendAppendEntries(sid, retryArgs, retryReply)
 		}
 	}
 }
@@ -554,13 +569,15 @@ func (rf *Raft) leaderAppendEntriesTicker() {
 				if args.PrevLogIndex > 0 {
 					args.PrevLogTerm = rf.log[args.PrevLogIndex-1].Term
 				}
-				args.Entries = rf.log[rf.nextIndex[rid]-1:]
+				copyEntries := rf.log[rf.nextIndex[rid]-1:]
+				args.Entries = make([]Entry, len(copyEntries))
+				copy(args.Entries, copyEntries)
 				reply := &AppendEntriesReply{}
 				go rf.sendAppendEntries(rid, args, reply)
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(30 * time.Millisecond)
 	}
 }
 
@@ -592,11 +609,11 @@ func (rf *Raft) leaderUpdateCommitTicker() {
 		// 	// log.Printf("leader %v update the CommitIndex to %v in term %v", rf.me, rf.commitIndex, rf.currentTerm)
 		// }
 		rf.mu.Unlock()
-		time.Sleep(40 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
-// leader's goroutine for initializing,  sending heart beat, starting other goroutines
+// leader's goroutine for initializing,  sending heart beat, and starting other goroutines
 func (rf *Raft) leaderTicker() {
 	rf.mu.Lock()
 	if rf.state != 2 {
