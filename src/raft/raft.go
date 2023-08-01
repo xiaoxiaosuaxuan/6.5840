@@ -232,10 +232,11 @@ func (rf *Raft) sendAppendEntries(sid int, args *AppendEntriesArgs, reply *Appen
 			idx := args.PrevLogIndex + len(args.Entries)
 			if idx > rf.matchIndex[sid] { // matchIndex[sid] may be updated to a later position
 				rf.matchIndex[sid] = idx
-			}
-			if idx+1 > rf.nextIndex[sid] {
 				rf.nextIndex[sid] = idx + 1
 			}
+			// if idx+1 > rf.nextIndex[sid] {
+			// 	rf.nextIndex[sid] = idx + 1
+			// }
 		} else {
 			rf.nextIndex[sid] = args.PrevLogIndex
 		}
@@ -382,14 +383,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = -1
 	} else {
 		index = len(rf.log) + 1
-		go func() {
-			rf.mu.Lock()
-			rf.log = append(rf.log, Entry{
-				Term:    term,
-				Command: command,
-			})
-			rf.mu.Unlock()
-		}()
+		rf.log = append(rf.log, Entry{
+			Term:    term,
+			Command: command,
+		})
+		// log.Printf("leader %v get a new log with index %v in term %v", rf.me, index, rf.currentTerm)
 	}
 	return index, term, isLeader
 }
@@ -443,13 +441,17 @@ func (rf *Raft) applyCommit() {
 					Command:      rf.log[logId].Command,
 					CommandIndex: logId + 1,
 				})
+				// log.Printf("server %v (state: %v) apply the msg(%v)", rf.me, rf.state, logId+1)
 			}
 			rf.lastApplied = rf.commitIndex
 		}
 		rf.mu.Unlock()
 		for _, msg := range tmpMsgs { // without holding lock,  to avoid applyCh blocking
+			// log.Printf("start msg %v!", msg.CommandIndex)
 			rf.applyCh <- msg
+			// log.Printf("success msg %v!", msg.CommandIndex)
 		}
+		time.Sleep(30 * time.Millisecond)
 	}
 }
 
@@ -473,10 +475,9 @@ func (rf *Raft) followerTicker() {
 	// rf.resetTimer = false
 	// rf.mu.Unlock()
 	for !rf.killed() {
-		ms := 150 + (rand.Int() % 200)
+		ms := 100 + (rand.Int() % 200)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		rf.mu.Lock()
-		// log.Printf("server id: %v, state: %v, term: %v", rf.me, rf.state, rf.currentTerm)
 		if rf.resetTimer {
 			rf.resetTimer = false
 			rf.mu.Unlock()
@@ -492,6 +493,7 @@ func (rf *Raft) candidateTicker() {
 	for !rf.killed() {
 
 		rf.mu.Lock()
+		// log.Printf("server %v become the candidate in term %v", rf.me, rf.currentTerm)
 		rf.state = 1
 		rf.currentTerm += 1
 		rf.votedFor = rf.me
@@ -523,7 +525,6 @@ func (rf *Raft) candidateTicker() {
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 
 		rf.mu.Lock()
-		// log.Printf("server id: %v, state: %v, term: %v, votes: %v", rf.me, rf.state, rf.currentTerm, rf.votes)
 		if rf.state != 1 {
 			rf.mu.Unlock()
 			break
@@ -532,21 +533,15 @@ func (rf *Raft) candidateTicker() {
 	}
 }
 
-// necessary check since the leader can (only) convert to follower asynchronously at any time
-// must hold the lock when called
-func (rf *Raft) leaderCheck() {
-	if rf.state != 2 {
-		rf.mu.Unlock()
-		return
-	}
-}
-
 // leader's goroutine that periodically check lastLogIndex >= nextIndex
 // and send AppendEntriesRPC
 func (rf *Raft) leaderAppendEntriesTicker() {
 	for !rf.killed() {
 		rf.mu.Lock()
-		rf.leaderCheck()
+		if rf.state != 2 {
+			rf.mu.Unlock()
+			return
+		}
 		for rid := range rf.peers {
 			if rid != rf.me && len(rf.log) >= rf.nextIndex[rid] {
 				args := &AppendEntriesArgs{
@@ -559,7 +554,6 @@ func (rf *Raft) leaderAppendEntriesTicker() {
 				if args.PrevLogIndex > 0 {
 					args.PrevLogTerm = rf.log[args.PrevLogIndex-1].Term
 				}
-				// log.Printf("nextIndex is %v", rf.nextIndex[rid])
 				args.Entries = rf.log[rf.nextIndex[rid]-1:]
 				reply := &AppendEntriesReply{}
 				go rf.sendAppendEntries(rid, args, reply)
@@ -574,7 +568,11 @@ func (rf *Raft) leaderAppendEntriesTicker() {
 func (rf *Raft) leaderUpdateCommitTicker() {
 	for !rf.killed() {
 		rf.mu.Lock()
-		rf.leaderCheck()
+		// oldCommit := rf.commitIndex
+		if rf.state != 2 {
+			rf.mu.Unlock()
+			return
+		}
 		for n := rf.commitIndex + 1; n <= len(rf.log); n++ {
 			if rf.log[n-1].Term != rf.currentTerm {
 				continue
@@ -590,6 +588,9 @@ func (rf *Raft) leaderUpdateCommitTicker() {
 				}
 			}
 		}
+		// if oldCommit != rf.commitIndex {
+		// 	// log.Printf("leader %v update the CommitIndex to %v in term %v", rf.me, rf.commitIndex, rf.currentTerm)
+		// }
 		rf.mu.Unlock()
 		time.Sleep(40 * time.Millisecond)
 	}
@@ -598,7 +599,10 @@ func (rf *Raft) leaderUpdateCommitTicker() {
 // leader's goroutine for initializing,  sending heart beat, starting other goroutines
 func (rf *Raft) leaderTicker() {
 	rf.mu.Lock()
-	rf.leaderCheck()
+	if rf.state != 2 {
+		rf.mu.Unlock()
+		return
+	}
 	rf.nextIndex = make([]int, len(rf.peers)) // initialize matchIndex[] and nextIndex
 	rf.matchIndex = make([]int, len(rf.peers))
 	for rid := range rf.peers {
@@ -607,6 +611,7 @@ func (rf *Raft) leaderTicker() {
 			rf.matchIndex[rid] = 0
 		}
 	}
+	// log.Printf("server %v become the leader in term %v", rf.me, rf.currentTerm)
 	rf.mu.Unlock()
 
 	go rf.leaderAppendEntriesTicker()
@@ -614,7 +619,10 @@ func (rf *Raft) leaderTicker() {
 
 	for !rf.killed() {
 		rf.mu.Lock()
-		rf.leaderCheck()
+		if rf.state != 2 {
+			rf.mu.Unlock()
+			return
+		}
 		for rid := range rf.peers {
 			if rid != rf.me {
 				args := &AppendEntriesArgs{
@@ -665,6 +673,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.commitIndex = 0
 	rf.lastApplied = 0
+	rf.applyCh = applyCh
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
