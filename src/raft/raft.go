@@ -159,6 +159,10 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	// for fast backup
+	XTerm  int
+	XIndex int
+	XLen   int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -182,6 +186,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex != 0 && // AppendEntriesRPC. 2 Rule
 		(len(rf.log) < args.PrevLogIndex || rf.log[args.PrevLogIndex-1].Term != args.PrevLogTerm) {
 		reply.Success = false
+		if len(rf.log) < args.PrevLogIndex { // fast backup
+			reply.XTerm = -1
+			reply.XLen = len(rf.log)
+		} else {
+			reply.XTerm = rf.log[args.PrevLogIndex-1].Term
+			idx := args.PrevLogIndex - 1
+			for {
+				if idx >= 1 && rf.log[idx-1].Term == reply.XTerm {
+					idx--
+				} else {
+					break
+				}
+			}
+			reply.XIndex = idx + 1
+		}
 		return
 	}
 
@@ -234,11 +253,28 @@ func (rf *Raft) sendAppendEntries(sid int, args *AppendEntriesArgs, reply *Appen
 				rf.matchIndex[sid] = idx
 				rf.nextIndex[sid] = idx + 1
 			}
-			// if idx+1 > rf.nextIndex[sid] {
-			// 	rf.nextIndex[sid] = idx + 1
-			// }
 		} else {
-			rf.nextIndex[sid] = args.PrevLogIndex
+			if reply.XTerm == -1 { //fast backup to find a proper nextIndex
+				rf.nextIndex[sid] = reply.XLen + 1
+			} else {
+				var XTermIdx int
+				var findXTerm bool = false
+				for idx := args.PrevLogIndex - 1; idx >= 0; idx-- {
+					if rf.log[idx].Term < reply.XTerm {
+						break
+					} else if rf.log[idx].Term == reply.XTerm {
+						XTermIdx = idx
+						findXTerm = true
+						break
+					}
+				}
+				if !findXTerm {
+					rf.nextIndex[sid] = reply.XIndex
+				} else {
+					rf.nextIndex[sid] = XTermIdx + 1 + 1
+				}
+			}
+			// rf.nextIndex[sid] = args.PrevLogIndex
 			retryArgs := &AppendEntriesArgs{ // send a new AppendEntriesRPC immediately
 				Term:         rf.currentTerm,
 				LeaderId:     rf.me,
