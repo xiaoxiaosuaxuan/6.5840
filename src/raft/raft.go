@@ -20,12 +20,15 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -115,6 +118,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftState := w.Bytes()
+	rf.persister.Save(raftState, nil)
 }
 
 // restore previously persisted state.
@@ -135,6 +145,19 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm, votedFor int
+	var logs []Entry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&logs) != nil {
+		log.Fatalf("Decode fails in readPersist!")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = logs
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -218,6 +241,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if entryIndex < len(args.Entries) {
 		rf.log = rf.log[:myLogIndex]
 		rf.log = append(rf.log, args.Entries[entryIndex:]...)
+		rf.persist() // persists
 	}
 
 	if len(rf.log) < args.LeaderCommit { // update commit index, min(LeaderCommit, len(log))  ,5 Rule
@@ -244,6 +268,7 @@ func (rf *Raft) sendAppendEntries(sid int, args *AppendEntriesArgs, reply *Appen
 			rf.state = 0
 			rf.nextIndex = []int{}
 			rf.matchIndex = []int{}
+			rf.persist() // persist
 			go rf.followerTicker()
 			return
 		}
@@ -325,11 +350,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		return
 	}
+	// here rf.votedFor == args.CandidateId is for the case that rf crashed and goes back again,
+	// and it will read votedFor from persistent state
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		if len(rf.log) == 0 {
 			reply.VoteGranted = true
 			rf.resetTimer = true
 			rf.votedFor = args.CandidateId
+			rf.persist() // persist
 			return
 		}
 		if rf.log[len(rf.log)-1].Term < args.LastLogTerm ||
@@ -338,6 +366,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = true
 			rf.resetTimer = true
 			rf.votedFor = args.CandidateId
+			rf.persist() // persist
 			return
 		}
 	}
@@ -376,8 +405,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	oldTerm := args.Term
 	if ok {
 		rf.mu.Lock()
+		defer rf.mu.Unlock()
 		if (rf.currentTerm != oldTerm) || rf.state != 1 {
-			rf.mu.Unlock()
 			return
 		}
 		if reply.Term > rf.currentTerm {
@@ -385,7 +414,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.currentTerm = reply.Term
 			rf.votedFor = -1
 			rf.votes = 0
-			rf.mu.Unlock()
+			rf.persist() //persist
 			go rf.followerTicker()
 			return
 		}
@@ -393,12 +422,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			rf.votes += 1
 			if rf.votes >= len(rf.peers)/2+1 {
 				rf.state = 2
-				rf.mu.Unlock()
+				rf.persist() //persist
 				go rf.leaderTicker()
 				return
 			}
 		}
-		rf.mu.Unlock()
 	}
 }
 
@@ -438,6 +466,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:    term,
 			Command: command,
 		})
+		rf.persist() // persist
 		// log.Printf("leader %v get a new log with index %v in term %v", rf.me, index, rf.currentTerm)
 	}
 	return index, term, isLeader
@@ -512,6 +541,7 @@ func (rf *Raft) checkHigherTerm(term int) {
 	if term > rf.currentTerm {
 		rf.currentTerm = term
 		rf.votedFor = -1
+		rf.persist() //persist
 		rf.votes = 0
 		if rf.state != 0 {
 			rf.state = 0
@@ -548,6 +578,7 @@ func (rf *Raft) candidateTicker() {
 		rf.state = 1
 		rf.currentTerm += 1
 		rf.votedFor = rf.me
+		rf.persist() // persist
 		rf.votes = 1
 		rf.resetTimer = true
 		term := rf.currentTerm
@@ -731,9 +762,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	// start ticker goroutine to start elections
+	// start follower ticker goroutine to start elections
 	go rf.followerTicker()
-	// start the applyCommit goroutine
+	// start the applyCommit goroutine, necessary for every raft server
 	go rf.applyCommit()
 
 	return rf
