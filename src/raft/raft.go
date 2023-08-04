@@ -252,6 +252,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 }
 
+func (rf *Raft) makeAppendEntriesArgs(sid int) *AppendEntriesArgs {
+	args := &AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: rf.nextIndex[sid] - 1,
+		PrevLogTerm:  -1,
+		LeaderCommit: rf.commitIndex,
+	}
+	if args.PrevLogIndex != 0 {
+		args.PrevLogTerm = rf.log[args.PrevLogIndex-1].Term
+	}
+	tocpyEntries := rf.log[rf.nextIndex[sid]-1:]
+	args.Entries = make([]Entry, len(tocpyEntries))
+	copy(args.Entries, tocpyEntries)
+	return args
+}
+
 func (rf *Raft) sendAppendEntries(sid int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	oldTerm := args.Term
 	ok := rf.peers[sid].Call("Raft.AppendEntries", args, reply)
@@ -274,7 +291,7 @@ func (rf *Raft) sendAppendEntries(sid int, args *AppendEntriesArgs, reply *Appen
 		}
 		if reply.Success {
 			idx := args.PrevLogIndex + len(args.Entries)
-			if idx > rf.matchIndex[sid] { // matchIndex[sid] may be updated to a later position
+			if idx > rf.matchIndex[sid] { // matchIndex[sid] may have been updated to a later position because of unordered replies
 				rf.matchIndex[sid] = idx
 				rf.nextIndex[sid] = idx + 1
 			}
@@ -299,20 +316,7 @@ func (rf *Raft) sendAppendEntries(sid int, args *AppendEntriesArgs, reply *Appen
 					rf.nextIndex[sid] = XTermIdx + 1 + 1
 				}
 			}
-			// rf.nextIndex[sid] = args.PrevLogIndex
-			retryArgs := &AppendEntriesArgs{ // send a new AppendEntriesRPC immediately
-				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: rf.nextIndex[sid] - 1,
-				PrevLogTerm:  -1,
-				LeaderCommit: rf.commitIndex,
-			}
-			if retryArgs.PrevLogIndex != 0 {
-				retryArgs.PrevLogTerm = rf.log[retryArgs.PrevLogIndex-1].Term
-			}
-			copyEntries := rf.log[rf.nextIndex[sid]-1:]
-			retryArgs.Entries = make([]Entry, len(copyEntries))
-			copy(retryArgs.Entries, copyEntries)
+			retryArgs := rf.makeAppendEntriesArgs(sid) // send a new AppendEntriesRPC immediately
 			retryReply := &AppendEntriesReply{}
 			go rf.sendAppendEntries(sid, retryArgs, retryReply)
 		}
@@ -626,19 +630,7 @@ func (rf *Raft) leaderAppendEntriesTicker() {
 		}
 		for rid := range rf.peers {
 			if rid != rf.me && len(rf.log) >= rf.nextIndex[rid] {
-				args := &AppendEntriesArgs{
-					Term:         rf.currentTerm,
-					LeaderId:     rf.me,
-					PrevLogIndex: rf.nextIndex[rid] - 1,
-					PrevLogTerm:  -1,
-					LeaderCommit: rf.commitIndex,
-				}
-				if args.PrevLogIndex > 0 {
-					args.PrevLogTerm = rf.log[args.PrevLogIndex-1].Term
-				}
-				copyEntries := rf.log[rf.nextIndex[rid]-1:]
-				args.Entries = make([]Entry, len(copyEntries))
-				copy(args.Entries, copyEntries)
+				args := rf.makeAppendEntriesArgs(rid)
 				reply := &AppendEntriesReply{}
 				go rf.sendAppendEntries(rid, args, reply)
 			}
@@ -709,24 +701,12 @@ func (rf *Raft) leaderTicker() {
 		}
 		for rid := range rf.peers {
 			if rid != rf.me {
-				args := &AppendEntriesArgs{
-					Term:         rf.currentTerm,
-					LeaderId:     rf.me,
-					PrevLogIndex: rf.nextIndex[rid] - 1,
-					LeaderCommit: rf.commitIndex,
-				}
-				if args.PrevLogIndex == 0 {
-					args.PrevLogTerm = -1
-				} else {
-					args.PrevLogTerm = rf.log[args.PrevLogIndex-1].Term
-				}
-				args.Entries = []Entry{}
+				args := rf.makeAppendEntriesArgs(rid)
 				reply := &AppendEntriesReply{}
 				go rf.sendAppendEntries(rid, args, reply)
 			}
 		}
 		rf.mu.Unlock()
-
 		time.Sleep(100 * time.Millisecond)
 	}
 }
